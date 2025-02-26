@@ -1,0 +1,226 @@
+-module(chat_server).
+-behaviour(gen_server).
+
+%% API
+-export([start_link/0, send_message/2, get_messages/0, register_user/2, login_user/2, logout_user/1]).
+
+%% GenServer callbacks
+-export([init/1, handle_call/3, handle_cast/2, terminate/2]).
+
+-record(state, {users, logged_in_users, messages}).
+
+%% Khởi động GenServer
+start_link() ->
+    gen_server:start_link({local, ?MODULE}, ?MODULE, [], []).
+
+%% GenServer callback init/1
+init(_) ->
+    {ok, #state{users = [], logged_in_users = [], messages = []}}.
+
+%% API đăng ký user
+register_user(Username, Password) ->
+    gen_server:call(?MODULE, {register, Username, Password}).
+
+%% API đăng nhập user
+login_user(Username, Password) ->
+    gen_server:call(?MODULE, {login, Username, Password}).
+
+%% API đăng xuất user
+logout_user(Username) ->
+    gen_server:call(?MODULE, {logout, Username}).
+
+%% API gửi tin nhắn, chỉ khi đã đăng nhập
+send_message(Sender, Content) ->
+    gen_server:call(?MODULE, {send_message, Sender, Content}).
+
+%% API lấy tin nhắn
+get_messages() ->
+    gen_server:call(?MODULE, get_messages).
+
+%% Xử lý các request của GenServer
+handle_call({register, Username, Password}, _From, State) ->
+    % Đăng ký user vào danh sách
+    case lists:keyfind(Username, 1, State#state.users) of
+        false ->
+            NewUsers = [{Username, Password} | State#state.users],
+            {reply, {ok, "User registered"}, State#state{users = NewUsers}};
+        _ ->
+            {reply, {error, "User already exists"}, State}
+    end;
+
+handle_call({login, Username, Password}, _From, State) ->
+    case lists:keyfind(Username, 1, State#state.users) of
+        {Username, Password} ->
+            % Nếu đăng nhập thành công, thêm vào danh sách người dùng đăng nhập
+            NewLoggedIn = lists:usort([Username | State#state.logged_in_users]),
+            {reply, {ok, "Login successful"}, State#state{logged_in_users = NewLoggedIn}};
+        _ ->
+            {reply, {error, "Invalid credentials"}, State}
+    end;
+
+handle_call({logout, Username}, _From, State) ->
+    % Xóa người dùng khỏi danh sách đăng nhập
+    NewLoggedIn = lists:delete(Username, State#state.logged_in_users),
+    {reply, {ok, "Logout successful"}, State#state{logged_in_users = NewLoggedIn}};
+
+handle_call({send_message, Sender, Content}, _From, State) ->
+    % Chỉ gửi tin nhắn nếu người dùng đã đăng nhập
+    case lists:member(Sender, State#state.logged_in_users) of
+        true ->
+            % Lưu tin nhắn và gửi cho tất cả người dùng đã đăng nhập
+            NewMessage = {Sender, Content},
+            NewMessages = [NewMessage | State#state.messages],
+            broadcast_message(Sender, Content, State#state.logged_in_users),
+            {reply, {ok, "Message sent"}, State#state{messages = NewMessages}};
+        false ->
+            {reply, {error, "User not logged in"}, State}
+    end;
+
+handle_call(get_messages, _From, State) ->
+    {reply, State#state.messages, State}.
+
+terminate(_Reason, _State) ->
+    ok.
+
+%% Gửi tin nhắn đến tất cả người dùng đã đăng nhập
+broadcast_message(_Sender, _Content, []) ->
+    ok;
+broadcast_message(Sender, Content, [User | Rest]) ->
+    io:format("Message from ~s to ~s: ~s~n", [Sender, User, Content]),
+    broadcast_message(Sender, Content, Rest).
+
+
+
+
+
+-module(chat_client).
+-behaviour(gen_fsm).
+
+%% API
+-export([start_link/1, stop/0, register/2, login/2, logout/1, send_message/2]).
+
+%% FSM callbacks
+-export([init/1, idle/2, logged_in/2, terminate/3]).
+
+%% Trạng thái khởi đầu của FSM
+start_link(UserName) ->
+    gen_fsm:start_link({local, UserName}, ?MODULE, UserName, []).
+
+stop() ->
+    gen_fsm:sync_send_all_state_event(?MODULE, stop).
+
+register(UserName, Password) ->
+    chat_server:register_user(UserName, Password).
+
+login(UserName, Password) ->
+    chat_server:login_user(UserName, Password),
+    gen_fsm:sync_send_event(?MODULE, {login, UserName}).
+
+logout(UserName) ->
+    chat_server:logout_user(UserName),
+    gen_fsm:sync_send_event(?MODULE, {logout, UserName}).
+
+send_message(UserName, Content) ->
+    chat_server:send_message(UserName, Content),
+    gen_fsm:sync_send_event(?MODULE, {send_message, UserName, Content}).
+
+%% FSM callback init/1
+init(UserName) ->
+    {ok, idle, UserName}.
+
+%% Trạng thái idle (chưa đăng nhập)
+idle({login, UserName}, StateData) ->
+    io:format("~s logged in~n", [UserName]),
+    {next_state, logged_in, StateData};
+idle(stop, StateData) ->
+    {stop, normal, StateData}.
+
+%% Trạng thái logged_in (đã đăng nhập)
+logged_in({send_message, UserName, Content}, StateData) ->
+    io:format("~s sent: ~s~n", [UserName, Content]),
+    {next_state, logged_in, StateData};
+logged_in({logout, UserName}, StateData) ->
+    io:format("~s logged out~n", [UserName]),
+    {next_state, idle, StateData};
+logged_in(stop, StateData) ->
+    {stop, normal, StateData}.
+
+terminate(_Reason, _StateName, _StateData) ->
+    ok.
+
+
+
+-module(chat_manager).
+-export([create_message_table/0, send_message/2, get_messages/0]).
+
+%% Tạo bảng tin nhắn trong Mnesia (nếu có sử dụng Mnesia, nhưng ở đây ta giữ nguyên danh sách trong GenServer)
+create_message_table() ->
+    mnesia:create_table(messages, [{disc_copies, [node()]}, {attributes, [sender, content, timestamp]}]).
+
+%% Gửi tin nhắn vào Mnesia
+send_message(Sender, Content) ->
+    Timestamp = erlang:system_time(),
+    F = fun() ->
+        mnesia:write({messages, Sender, Content, Timestamp}),
+        {ok, "Message sent"}
+    end,
+    mnesia:transaction(F).
+
+%% Truy xuất tất cả các tin nhắn đã được lưu
+get_messages() ->
+    F = fun() ->
+        mnesia:match_object({messages, '_', '_', '_'})
+    end,
+    case mnesia:transaction(F) of
+        {atomic, Messages} -> Messages;
+        {aborted, Reason} -> {error, Reason}
+    end.
+
+
+
+
+-module(user_manager).
+-export([create_user_table/0, register/2, login/2, logout/1]).
+
+-record(user, {username, password}).
+
+%% Tạo bảng người dùng trong Mnesia
+create_user_table() ->
+    mnesia:create_table(users, [{disc_copies, [node()]}, {attributes, record_info(fields, user)}]).
+
+%% Đăng ký người dùng mới
+register(Username, Password) ->
+    F = fun() ->
+        case mnesia:read({users, Username}) of
+            [] ->
+                mnesia:write({users, Username, #user{username = Username, password = Password}}),
+                {ok, "User registered successfully"};
+            _ ->
+                {error, "Username already taken"}
+        end
+    end,
+    mnesia:transaction(F).
+
+%% Đăng nhập người dùng
+login(Username, Password) ->
+    F = fun() ->
+        case mnesia:read({users, Username}) of
+            [{users, Username, #user{password = P}}] when P =:= Password ->
+                {ok, "Login successful"};
+            _ ->
+                {error, "Invalid credentials"}
+        end
+    end,
+    mnesia:transaction(F).
+
+%% Đăng xuất người dùng (chỉ in ra trạng thái đăng xuất)
+logout(Username) ->
+    io:format("User ~s logged out~n", [Username]),
+    {ok, "Logout successful"}.
+
+
+
+
+
+
+
