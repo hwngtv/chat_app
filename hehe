@@ -1,0 +1,74 @@
+-module(chat_client).
+-behaviour(gen_fsm).
+
+%% API
+-export([start_link/1, register/2, login/2, send_message/2, stop/0]).
+
+%% gen_fsm callbacks
+-export([init/1, handle_event/3, handle_sync_event/4, terminate/3, code_change/4]).
+
+-record(state, {username}).
+
+%% Khởi động client với một username
+start_link(Username) ->
+    gen_fsm:start_link({local, {chat_client, Username}}, chat_client, Username, []).
+
+%% Khởi tạo FSM ở trạng thái 'idle'
+init(Username) ->
+    io:format("Client started for user: ~s~n", [Username]),
+    {ok, idle, #state{username = Username}}.
+
+%% Trạng thái 'idle' (người dùng chưa đăng nhập)
+idle({register, Username, Password}, _From, State) ->
+    case chat_server:register_user(Username, Password) of
+        {ok, Msg} ->
+            io:format("~s~n", [Msg]),
+            {reply, {ok, Msg}, idle, State};
+        {error, Reason} ->
+            {reply, {error, Reason}, idle, State}
+    end;
+
+idle({login, Username, Password}, _From, State) ->
+    case chat_server:login_user(Username, Password) of
+        {ok, Msg} ->
+            io:format("~s~n", [Msg]),
+            {next_state, logged_in, State};
+        {error, Reason} ->
+            {reply, {error, Reason}, idle, State}
+    end.
+
+%% Trạng thái 'logged_in' (người dùng đã đăng nhập)
+logged_in({send_message, Username, Content}, _From, State) ->
+    case chat_server:send_message(Username, Content) of
+        {ok, Msg} ->
+            io:format("Message sent: ~s~n", [Content]),
+            {reply, {ok, Msg}, logged_in, State};
+        {error, Reason} ->
+            io:format("Error sending message: ~s~n", [Reason]),
+            {reply, {error, Reason}, logged_in, State}
+    end;
+
+logged_in({logout, Username}, _From, State) ->
+    chat_server:logout_user(Username),
+    io:format("User ~s logged out~n", [Username]),
+    {next_state, idle, State}.
+
+%% Dừng client
+stop() ->
+    gen_fsm:stop(chat_client).
+
+%% Xử lý các sự kiện bất đồng bộ (được bỏ qua trong FSM)
+handle_event(_Event, _StateName, _State) ->
+    {next_state, _StateName, _State}.
+
+%% Xử lý các sự kiện đồng bộ
+handle_sync_event(Event, _From, _StateName, State) ->
+    {next_state, _StateName, State}.
+
+%% Callback khi FSM dừng
+terminate(_Reason, _StateName, _State) ->
+    ok.
+
+%% Không thay đổi mã
+code_change(_OldVsn, StateName, State, _Extra) ->
+    {ok, StateName, State}.
