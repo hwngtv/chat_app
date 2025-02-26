@@ -1,0 +1,112 @@
+-module(chat_client).
+-behaviour(gen_fsm).
+
+%% API
+-export([start_link/1, register/2, login/2, send_message/2, logout/1]).
+
+%% FSM callbacks
+-export([init/1, idle/2, logged_in/2]).
+
+-record(state, {username, server}).
+
+%% Khởi động client
+start_link(Username) ->
+    gen_fsm:start_link({local, {chat_client, Username}}, ?MODULE, Username, []).
+
+init(Username) ->
+    {ok, idle, #state{username=Username, server=chat_server}}.
+
+%% Trạng thái idle (chưa đăng nhập)
+idle({register, Username, Password}, State) ->
+    Result = gen_server:call(chat_server, {register_user, Username, Password}),
+    {next_state, idle, State, Result};
+
+idle({login, Username, Password}, State) ->
+    case gen_server:call(chat_server, {login_user, Username, Password}) of
+        {ok, _Msg} ->
+            {next_state, logged_in, State};
+        {error, _Reason} ->
+            {reply, {error, "Login failed"}, idle, State}
+    end.
+
+%% Trạng thái logged_in (đã đăng nhập)
+logged_in({send_message, Username, Content}, State) ->
+    Result = gen_server:call(chat_server, {send_message, Username, Content}),
+    {next_state, logged_in, State, Result};
+
+logged_in({logout, Username}, State) ->
+    Result = gen_server:call(chat_server, {logout_user, Username}),
+    {next_state, idle, State, Result}.
+
+%% API đăng ký người dùng
+register(Username, Password) ->
+    gen_fsm:send_event({chat_client, Username}, {register, Username, Password}).
+
+%% API đăng nhập
+login(Username, Password) ->
+    gen_fsm:send_event({chat_client, Username}, {login, Username, Password}).
+
+%% API gửi tin nhắn
+send_message(Username, Content) ->
+    gen_fsm:send_event({chat_client, Username}, {send_message, Username, Content}).
+
+%% API đăng xuất
+logout(Username) ->
+    gen_fsm:send_event({chat_client, Username}, {logout, Username}).
+
+
+
+-module(chat_server).
+-behaviour(gen_server).
+
+%% API
+-export([start_link/0, register_user/2, login_user/2, send_message/2, logout_user/1]).
+
+%% GenServer callbacks
+-export([init/1, handle_call/3]).
+
+-record(state, {users, logged_in_users}).
+
+start_link() ->
+    gen_server:start_link({local, chat_server}, ?MODULE, [], []).
+
+init(_) ->
+    {ok, #state{users = [], logged_in_users = []}}.
+
+%% Xử lý đăng ký người dùng
+handle_call({register_user, Username, Password}, _From, State) ->
+    case lists:keyfind(Username, 1, State#state.users) of
+        false ->
+            NewUsers = [{Username, Password} | State#state.users],
+            {reply, {ok, "User registered successfully"}, State#state{users = NewUsers}};
+        _ ->
+            {reply, {error, "Username already taken"}, State}
+    end.
+
+%% Xử lý đăng nhập
+handle_call({login_user, Username, Password}, _From, State) ->
+    case lists:keyfind(Username, 1, State#state.users) of
+        {Username, Pwd} when Pwd =:= Password ->
+            NewLoggedInUsers = lists:usort([Username | State#state.logged_in_users]),
+            {reply, {ok, "Login successful"}, State#state{logged_in_users = NewLoggedInUsers}};
+        _ ->
+            {reply, {error, "Invalid credentials"}, State}
+    end.
+
+%% Xử lý gửi tin nhắn
+handle_call({send_message, Sender, Content}, _From, State) ->
+    case lists:member(Sender, State#state.logged_in_users) of
+        true ->
+            io:format("Message from ~s: ~s~n", [Sender, Content]),
+            {reply, {ok, "Message sent"}, State};
+        false ->
+            {reply, {error, "User not logged in"}, State}
+    end.
+
+%% Xử lý đăng xuất
+handle_call({logout_user, Username}, _From, State) ->
+    NewLoggedInUsers = lists:delete(Username, State#state.logged_in_users),
+    {reply, {ok, "Logout successful"}, State#state{logged_in_users = NewLoggedInUsers}}.
+
+
+
